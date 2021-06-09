@@ -23,6 +23,7 @@ import pkg_resources as pkg
 import torch
 import torchvision
 import yaml
+import copy
 
 from utils.google_utils import gsutil_getsize
 from utils.metrics import fitness
@@ -529,8 +530,9 @@ def non_max_suppression(prediction, conf_thres=0.25, iou_thres=0.45, classes=Non
          list of detections, on (n,6) tensor per image [xyxy, conf, cls]
     """
 
-    nc = prediction.shape[2] - 5  # number of classes
-    xc = prediction[..., 4] > conf_thres  # candidates
+    #nc = prediction.shape[2] - 5  # number of classes
+    nc = int((prediction[0].shape[1] - 4)/2)
+    xc = prediction[..., 4] > -9999  # candidates
 
     # Checks
     assert 0 <= conf_thres <= 1, f'Invalid Confidence threshold {conf_thres}, valid values are between 0.0 and 1.0'
@@ -550,13 +552,14 @@ def non_max_suppression(prediction, conf_thres=0.25, iou_thres=0.45, classes=Non
         # Apply constraints
         # x[((x[..., 2:4] < min_wh) | (x[..., 2:4] > max_wh)).any(1), 4] = 0  # width-height
         x = x[xc[xi]]  # confidence
+        x_copy = copy.deepcopy(x)
 
         # Cat apriori labels if autolabelling
         if labels and len(labels[xi]):
             l = labels[xi]
-            v = torch.zeros((len(l), nc + 5), device=x.device)
+            v = torch.zeros((len(l), 2*nc + 4), device=x.device)
             v[:, :4] = l[:, 1:5]  # box
-            v[:, 4] = 1.0  # conf
+            v[:, 4:4+nc] = 1.0  # conf
             v[range(len(l)), l[:, 0].long() + 5] = 1.0  # cls
             x = torch.cat((x, v), 0)
 
@@ -565,17 +568,22 @@ def non_max_suppression(prediction, conf_thres=0.25, iou_thres=0.45, classes=Non
             continue
 
         # Compute conf
-        x[:, 5:] *= x[:, 4:5]  # conf = obj_conf * cls_conf
+        y = x.clone()
+        #x[:, 5:] *= x[:, 4:5]  # conf = obj_conf * cls_conf
+        for i in range(nc):
+            x[:, 5+i] = x_copy[:, 4+i] * x_copy[:, 4+i+nc] # conf = obj_conf * cls_conf
+            x[:, 4+i+nc] = -1
+
 
         # Box (center x, center y, width, height) to (x1, y1, x2, y2)
         box = xywh2xyxy(x[:, :4])
 
         # Detections matrix nx6 (xyxy, conf, cls)
         if multi_label:
-            i, j = (x[:, 5:] > conf_thres).nonzero(as_tuple=False).T
+            i, j = (x[:, 5:5+nc] > conf_thres).nonzero(as_tuple=False).T
             x = torch.cat((box[i], x[i, j + 5, None], j[:, None].float()), 1)
         else:  # best class only
-            conf, j = x[:, 5:].max(1, keepdim=True)
+            conf, j = x[:, 5:5 + nc].max(1, keepdim=True)
             x = torch.cat((box, conf, j.float()), 1)[conf.view(-1) > conf_thres]
 
         # Filter by class
